@@ -76,6 +76,27 @@ Timestamps are in seconds, rounded to 2 decimals. `confidence` is
 decoding window, so segments decoded in the same window can share a value, as
 they do here. Treat it as a rough signal, not a calibrated probability.
 
+## Web demo (optional extra)
+
+A thin FastAPI wrapper (`server.py`) and a single page (`web/index.html`) for
+trying the pipeline in a browser: upload or drag in a file, then read the
+segments, click one to jump the audio player to it, and download the JSON.
+
+```bash
+uvicorn server:app --port 8000                          # faster-whisper, base model
+TRANSCRIBE_MODEL=tiny uvicorn server:app --port 8000    # smaller, faster model
+TRANSCRIBE_BACKEND=mock uvicorn server:app --port 8000  # no model needed
+# then open http://localhost:8000
+
+curl -F file=@call.wav http://localhost:8000/api/transcribe
+```
+
+`POST /api/transcribe` returns the same JSON as the CLI; errors come back as
+`{"error": "..."}` with `400` (invalid input), `413` (over 200 MB) or `500`
+(transcription failed). The model is loaded once and reused across requests.
+The demo endpoint is synchronous for simplicity, whereas the production design
+in Part 2 is asynchronous with a job queue.
+
 ## Part 1: Implementation notes
 
 **Engine.** faster-whisper runs locally: no API key, no per-minute cost, and
@@ -160,6 +181,19 @@ What was run by hand, on macOS with Python 3.12:
   - MP3 (44.1 kHz mono, 5.3 s): spoken "Please cancel my subscription at the
     end of this month. I no longer need the premium plan."; transcribed word
     for word as one segment, 0.00-5.20 s.
+
+Web demo (`tests/test_server.py` adds 3 tests, 9 pass in total):
+
+- `curl` against the server with the mock backend: a WAV returns the
+  transcript JSON; `.txt` and empty `.wav` return `400` with an error message.
+- With the real backend (`TRANSCRIBE_MODEL=tiny`): the WAV and MP3 samples
+  above came back with the same transcripts as the CLI; a corrupt `.mp3`
+  returns `500`. The `413` path was checked with the size limit lowered in a
+  test client, not with a real 200 MB upload.
+- In Chrome: uploaded the WAV and MP3 samples, the segments rendered, clicking
+  a segment seeked the player and highlighted it, and a corrupt file showed
+  the inline error. Not checked in the browser: drag and drop, the Download
+  JSON button, phone-width layout and keyboard-only use.
 
 Not tested: real human recordings (only synthesised speech), noisy audio,
 M4A/FLAC/OGG input, files near the 200 MB limit, and GPU execution.

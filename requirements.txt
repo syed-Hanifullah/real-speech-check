@@ -2,3 +2,9 @@ faster-whisper
 # faster-whisper 1.2.1 calls av.open(..., metadata_errors=...), removed in PyAV 19
 av<19
 pytest
+
+# Optional web demo (server.py)
+fastapi
+uvicorn
+python-multipart
+httpx

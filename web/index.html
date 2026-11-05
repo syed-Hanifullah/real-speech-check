@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcription demo</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
+    --line: #dddcd6; --accent: #2f5fd0; --active: #e8eefc; --warn-bg: #fff4d6;
+    --warn-text: #7a5300; --err-bg: #fde8e8; --err-text: #9b1c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  .drop {
+    display: block; border: 2px dashed var(--line); border-radius: 8px;
+    padding: 24px 16px; text-align: center; cursor: pointer;
+  }
+  .drop.over { border-color: var(--accent); background: var(--active); }
+  .drop input { display: block; margin: 8px auto 0; max-width: 100%; }
+  .drop:focus-within { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  label.lang { display: flex; gap: 8px; align-items: center; }
+  input[type=text] { width: 6em; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  button {
+    font: inherit; border-radius: 6px; padding: 8px 16px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: #fff;
+  }
+  button.secondary { background: var(--card); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .status { color: var(--muted); }
+  .spinner {
+    display: inline-block; width: 1em; height: 1em; vertical-align: -2px; margin-right: 6px;
+    border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error { background: var(--err-bg); color: var(--err-text); border-radius: 6px; padding: 10px 12px; margin-top: 12px; }
+  dl.meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 0 0 12px; }
+  dl.meta div { background: var(--bg); border-radius: 6px; padding: 6px 10px; }
+  dt { font-size: .8rem; color: var(--muted); }
+  dd { margin: 0; font-weight: 600; }
+  audio { width: 100%; }
+  ol.segments { list-style: none; margin: 0; padding: 0; }
+  ol.segments li + li { margin-top: 4px; }
+  .seg {
+    display: flex; gap: 12px; width: 100%; text-align: left; align-items: baseline;
+    background: transparent; color: var(--text); border: 1px solid transparent; padding: 8px 10px;
+  }
+  .seg:hover { border-color: var(--line); }
+  .seg.current { background: var(--active); border-color: var(--accent); }
+  .time { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; font-size: .9rem; }
+  .seg-text { flex: 1; }
+  .low {
+    font-size: .75rem; white-space: nowrap; background: var(--warn-bg); color: var(--warn-text);
+    border-radius: 4px; padding: 1px 6px;
+  }
+  [hidden] { display: none !important; }
+  @media (max-width: 480px) { .seg { flex-wrap: wrap; gap: 4px 8px; } .time { width: 100%; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Transcription demo</h1>
+  <p class="sub">Upload an audio file to get a timestamped transcript.</p>
+
+  <section class="card">
+    <form id="form">
+      <label class="drop" id="drop">
+        <span id="drop-text">Drop an audio file here, or choose one</span>
+        <input type="file" id="file" name="file" accept=".wav,.mp3,.m4a,.flac,.ogg">
+      </label>
+      <div class="row">
+        <label class="lang">Language
+          <input type="text" id="language" name="language" placeholder="auto" maxlength="10">
+        </label>
+        <button type="submit" id="submit" disabled>Transcribe</button>
+        <span class="status" id="status" role="status" aria-live="polite"></span>
+      </div>
+      <div class="error" id="error" role="alert" hidden></div>
+    </form>
+  </section>
+
+  <section class="card" id="result" hidden>
+    <dl class="meta">
+      <div><dt>Language</dt><dd id="m-lang"></dd></div>
+      <div><dt>Duration</dt><dd id="m-dur"></dd></div>
+      <div><dt>Model</dt><dd id="m-model"></dd></div>
+      <div><dt>Processing</dt><dd id="m-proc"></dd></div>
+    </dl>
+    <audio id="player" controls preload="metadata"></audio>
+    <div class="row">
+      <button type="button" class="secondary" id="download">Download JSON</button>
+    </div>
+    <h2 style="font-size:1.1rem;margin:16px 0 8px">Segments</h2>
+    <p class="status" id="no-speech" hidden>No speech was found in this file.</p>
+    <ol class="segments" id="segments"></ol>
+  </section>
+</main>
+
+<script>
+(function () {
+  const LOW_CONFIDENCE = 0.6;
+  const $ = (id) => document.getElementById(id);
+  const form = $("form"), fileInput = $("file"), drop = $("drop"), submit = $("submit");
+  const statusEl = $("status"), errorEl = $("error"), result = $("result");
+  const player = $("player"), list = $("segments");
+
+  let audioUrl = null, lastJson = null, rows = [], busy = false;
+
+  function selectedFile() { return fileInput.files[0] || null; }
+
+  function updateButton() { submit.disabled = busy || !selectedFile(); }
+
+  function showError(message) { errorEl.textContent = message; errorEl.hidden = false; }
+
+  function clearError() { errorEl.textContent = ""; errorEl.hidden = true; }
+
+  function setBusy(on) {
+    busy = on;
+    statusEl.textContent = "";
+    if (on) {
+      const spin = document.createElement("span");
+      spin.className = "spinner";
+      spin.setAttribute("aria-hidden", "true");
+      statusEl.append(spin, "Transcribing… this can take a while for long files");
+    }
+    updateButton();
+  }
+
+  function fmt(seconds) {
+    const s = Math.max(0, Math.floor(seconds));
+    return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+  }
+
+  fileInput.addEventListener("change", () => {
+    const f = selectedFile();
+    $("drop-text").textContent = f ? f.name : "Drop an audio file here, or choose one";
+    clearError();
+    updateButton();
+  });
+
+  ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => {
+    e.preventDefault(); drop.classList.add("over");
+  }));
+  ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => {
+    e.preventDefault(); drop.classList.remove("over");
+  }));
+  drop.addEventListener("drop", (e) => {
+    if (e.dataTransfer.files.length) {
+      fileInput.files = e.dataTransfer.files;
+      fileInput.dispatchEvent(new Event("change"));
+    }
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = selectedFile();
+    if (!f || busy) return;
+    clearError();
+    setBusy(true);
+
+    const body = new FormData();
+    body.append("file", f);
+    const lang = $("language").value.trim();
+    if (lang) body.append("language", lang);
+
+    try {
+      const res = await fetch("/api/transcribe", { method: "POST", body });
+      let data = null;
+      try { data = await res.json(); } catch (_) { /* non-JSON error page */ }
+      if (!res.ok) {
+        showError((data && data.error) || ("Request failed (HTTP " + res.status + ")"));
+        return;
+      }
+      render(data, f);
+    } catch (err) {
+      showError("Could not reach the server: " + err.message);
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  function render(data, f) {
+    lastJson = data;
+    $("m-lang").textContent = data.language
+      ? data.language + (data.language_probability != null ? " (" + Math.round(data.language_probability * 100) + "%)" : "")
+      : "unknown";
+    $("m-dur").textContent = data.duration_s != null ? fmt(data.duration_s) : "unknown";
+    $("m-model").textContent = data.backend + " / " + data.model;
+    $("m-proc").textContent = data.processing_s + " s";
+
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    audioUrl = URL.createObjectURL(f);
+    player.src = audioUrl;
+
+    list.replaceChildren();
+    rows = data.segments.map((seg) => {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "seg";
+
+      const time = document.createElement("span");
+      time.className = "time";
+      time.textContent = fmt(seg.start) + " - " + fmt(seg.end);
+
+      const text = document.createElement("span");
+      text.className = "seg-text";
+      text.textContent = seg.text;
+
+      btn.append(time, text);
+      if (seg.confidence != null && seg.confidence < LOW_CONFIDENCE) {
+        const low = document.createElement("span");
+        low.className = "low";
+        low.textContent = "low confidence";
+        btn.append(low);
+      }
+      btn.addEventListener("click", () => {
+        player.currentTime = seg.start;
+        player.play().catch(() => {});
+      });
+      li.append(btn);
+      list.append(li);
+      return { seg, btn };
+    });
+    $("no-speech").hidden = rows.length > 0;
+    result.hidden = false;
+  }
+
+  player.addEventListener("timeupdate", () => {
+    const t = player.currentTime;
+    rows.forEach(({ seg, btn }) => {
+      const on = t >= seg.start && t < seg.end;
+      btn.classList.toggle("current", on);
+      if (on) btn.setAttribute("aria-current", "true"); else btn.removeAttribute("aria-current");
+    });
+  });
+
+  $("download").addEventListener("click", () => {
+    if (!lastJson) return;
+    const blob = new Blob([JSON.stringify(lastJson, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = (lastJson.source_file || "transcript").replace(/\.[^.]+$/, "") + ".json";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+})();
+</script>
+</body>
+</html>

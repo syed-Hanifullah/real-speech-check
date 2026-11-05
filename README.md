@@ -9,8 +9,9 @@ needed, and your audio never leaves your machine.
 There are two ways to use it:
 
 - **Command line:** `python transcribe.py audio.wav` prints the transcript as JSON.
-- **Web page:** upload a file or record yourself in the browser, read the
-  transcript, click a line to hear it.
+- **Web page and API:** upload a file or record yourself in the browser, read
+  the transcript, click a line to hear it. Uploads go into a job queue with
+  automatic retries.
 
 ## 1. Setup
 
@@ -118,9 +119,35 @@ other tools.
 | `2` | Bad input: file missing, empty, too big, or not a supported type |
 | `3` | Transcription failed (e.g. the file is corrupt) |
 
-The web page's endpoint, `POST /api/transcribe`, returns the same JSON. Errors
-come back as `{"error": "..."}` with status `400` (bad input), `413` (over
-2 GB) or `500` (transcription failed).
+## Web API (job queue)
+
+The web page uses a small job API. Uploading returns at once with a job ID;
+a background worker does the transcription.
+
+| Request | Returns |
+|---|---|
+| `POST /v1/transcriptions` (form field `file`, optional `language`) | `202` and the job: `{"id": "...", "status": "queued", ...}` |
+| `GET /v1/transcriptions/{id}` | The job: `status` is `queued`, `running`, `done` or `failed`, plus `attempts` and `error` |
+| `GET /v1/transcriptions/{id}/result` | The transcript JSON (above, plus `job_id`) once the job is `done` |
+
+```bash
+curl -F file=@sample.wav localhost:8000/v1/transcriptions        # copy the "id"
+curl localhost:8000/v1/transcriptions/<id>
+curl localhost:8000/v1/transcriptions/<id>/result
+```
+
+- **Retries:** a failed job is tried again after 2 s, then 4 s, up to 3 attempts.
+  Bad or corrupt audio fails straight away, since retrying won't help.
+- **Survives restarts:** jobs are saved in SQLite (`data/jobs.db`). If the
+  server stops mid-job, the job runs again when it starts.
+- **Duplicates:** uploading the same file again returns the existing job.
+- **Cleanup:** the audio is deleted once a job finishes; only the transcript
+  is kept.
+- **Errors:** `{"error": "..."}` with `400` (bad input), `404` (no such job),
+  `409` (result not ready), `413` (over 2 GB) or `429` (queue full, try later).
+
+Settings: `TRANSCRIBE_WORKERS` (default `1`; each worker transcribes one file
+at a time) and `TRANSCRIBE_DATA_DIR` (default `data`).
 
 ## Long recordings
 
@@ -182,8 +209,10 @@ later, because the audio is kept.
 `GET /v1/transcriptions/{id}/result` returns the transcript. Secured with API
 keys, rate limited, with an optional webhook to notify the client when done.
 
-The web page in this repo is simpler: it waits for the result in a single
-request. The design above is what I'd build for real traffic.
+This repo already has a small version of it: the same API, a job queue,
+retries and restart recovery, using SQLite and worker threads so there's
+nothing extra to install. For real traffic, the queue would move to Redis or
+SQS, the audio to object storage, and workers to their own machines.
 
 ## Testing
 
@@ -191,7 +220,10 @@ request. The design above is what I'd build for real traffic.
 pytest
 ```
 
-Runs 13 tests using the mock backend, so no model download is needed.
+Runs 21 tests using the mock backend, so no model download is needed. They
+cover the pipeline, chunking, the API, and the job queue: retries, giving up
+after 3 attempts, no retry for corrupt audio, duplicates, a full queue, and
+resuming jobs after a restart.
 
 Also checked by hand on macOS:
 
@@ -216,7 +248,8 @@ in Safari or Firefox, Windows, GPUs.
 | File | Purpose |
 |---|---|
 | `transcribe.py` | The whole pipeline and the command line tool |
-| `server.py` | Web server for the demo page |
+| `server.py` | Web server: job API and the demo page |
+| `jobs.py` | Job queue: background workers, retries, restart recovery |
 | `web/index.html` | The demo page |
 | `tests/` | Automated tests |
 

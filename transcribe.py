@@ -46,6 +46,10 @@ class TranscriptionError(Exception):
     """The model could not be loaded or failed while transcribing."""
 
 
+class CorruptAudioError(TranscriptionError):
+    """The file could not be decoded, so trying again won't help."""
+
+
 @dataclass
 class Segment:
     id: int
@@ -140,6 +144,16 @@ def iter_audio_chunks(path: Path, chunk_s: float):
         yield start, np.concatenate(pending).astype(np.float32) / 32768.0
 
 
+def _decoded_chunks(path: Path, chunk_s: float):
+    """iter_audio_chunks, with decoder errors reported as CorruptAudioError."""
+    import av
+
+    try:
+        yield from iter_audio_chunks(path, chunk_s)
+    except av.error.FFmpegError as exc:
+        raise CorruptAudioError(f"could not decode {path.name}: {exc}") from exc
+
+
 class FasterWhisperBackend:
     """Local Whisper via faster-whisper, fed one chunk of audio at a time."""
 
@@ -169,7 +183,7 @@ class FasterWhisperBackend:
         segments: list[Segment] = []
         first_info = None
         total_samples = 0
-        for n, (start, audio) in enumerate(iter_audio_chunks(path, self.chunk_s), 1):
+        for n, (start, audio) in enumerate(_decoded_chunks(path, self.chunk_s), 1):
             offset = start / SAMPLE_RATE
             log.info("chunk %d: %s - %s", n, _clock(offset), _clock(offset + len(audio) / SAMPLE_RATE))
             raw_segments, info = self._model.transcribe(
@@ -196,7 +210,7 @@ class FasterWhisperBackend:
                 ))
             total_samples = start + len(audio)
         if first_info is None:
-            raise TranscriptionError(f"no audio could be decoded from {path.name}")
+            raise CorruptAudioError(f"no audio could be decoded from {path.name}")
         return segments, {
             "language": first_info.language,
             "language_probability": round(first_info.language_probability, 3),

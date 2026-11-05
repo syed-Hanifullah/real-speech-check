@@ -160,17 +160,36 @@
 
   function clearError() { errorEl.textContent = ""; errorEl.hidden = true; }
 
-  function setBusy(on) {
+  function setBusy(on, message) {
     busy = on;
     statusEl.textContent = "";
     if (on) {
       const spin = document.createElement("span");
       spin.className = "spinner";
       spin.setAttribute("aria-hidden", "true");
-      statusEl.append(spin, "Transcribing… this can take a while for long files");
+      statusEl.append(spin, message || "Uploading…");
     }
     updateButton();
   }
+
+  function jobMessage(job) {
+    if (job.status === "queued" && job.attempts > 0) {
+      return "Attempt " + job.attempts + " failed, retrying soon (" + job.error + ")";
+    }
+    if (job.status === "queued") return "Waiting in the queue…";
+    const attempt = job.attempts > 1 ? " (attempt " + job.attempts + " of " + job.max_attempts + ")" : "";
+    return "Transcribing" + attempt + "… this can take a while for long files";
+  }
+
+  async function getJson(url, options) {
+    const res = await fetch(url, options);
+    let data = null;
+    try { data = await res.json(); } catch (_) { /* non-JSON error page */ }
+    if (!res.ok) throw new Error((data && data.error) || ("Request failed (HTTP " + res.status + ")"));
+    return data;
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   function fmt(seconds) {
     const s = Math.max(0, Math.floor(seconds));
@@ -253,16 +272,19 @@
     if (lang) body.append("language", lang);
 
     try {
-      const res = await fetch("/api/transcribe", { method: "POST", body });
-      let data = null;
-      try { data = await res.json(); } catch (_) { /* non-JSON error page */ }
-      if (!res.ok) {
-        showError((data && data.error) || ("Request failed (HTTP " + res.status + ")"));
+      let job = await getJson("/v1/transcriptions", { method: "POST", body });
+      while (job.status === "queued" || job.status === "running") {
+        setBusy(true, jobMessage(job));
+        await sleep(1000);
+        job = await getJson("/v1/transcriptions/" + encodeURIComponent(job.id));
+      }
+      if (job.status === "failed") {
+        showError("Transcription failed: " + job.error);
         return;
       }
-      render(data, f);
+      render(await getJson("/v1/transcriptions/" + encodeURIComponent(job.id) + "/result"), f);
     } catch (err) {
-      showError("Could not reach the server: " + err.message);
+      showError(err instanceof TypeError ? "Could not reach the server: " + err.message : err.message);
     } finally {
       setBusy(false);
     }

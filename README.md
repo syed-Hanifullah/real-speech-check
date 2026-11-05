@@ -9,8 +9,8 @@ needed, and your audio never leaves your machine.
 There are two ways to use it:
 
 - **Command line:** `python transcribe.py audio.wav` prints the transcript as JSON.
-- **Web page:** upload a file in your browser, read the transcript, click a
-  line to hear it.
+- **Web page:** upload a file or record yourself in the browser, read the
+  transcript, click a line to hear it.
 
 ## 1. Setup
 
@@ -28,7 +28,8 @@ pip install -r requirements.txt
 
 ## 2. Get an audio file
 
-Use any `.wav`, `.mp3`, `.m4a`, `.flac` or `.ogg` file (up to 200 MB).
+Use any `.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg` or `.webm` file (up to 200 MB).
+On the web page you can also skip this and record from your microphone.
 
 No recording handy? On macOS, make one:
 
@@ -53,7 +54,13 @@ a minute. After that it's quick.
 TRANSCRIBE_MODEL=tiny uvicorn server:app --port 8000
 ```
 
-Then open <http://localhost:8000>. Stop the server with `Ctrl+C`.
+Then open <http://localhost:8000>. Upload a file, or press **Record audio**,
+speak, and press **Stop recording**. Then press **Transcribe**. Stop the server
+with `Ctrl+C`.
+
+The browser asks for microphone permission the first time. Recording only works
+when the page is opened via `localhost` or HTTPS, not a plain `http://` network
+address.
 
 **Try it without downloading a model:** add `--backend mock` to the command
 line, or start the server with `TRANSCRIBE_BACKEND=mock`. This returns a fixed
@@ -163,7 +170,7 @@ request. The design above is what I'd build for real traffic.
 pytest
 ```
 
-Runs 9 tests using the mock backend, so no model download is needed.
+Runs 10 tests using the mock backend, so no model download is needed.
 
 Also checked by hand on macOS:
 
@@ -173,9 +180,12 @@ Also checked by hand on macOS:
   one-line error.
 - The web page in Chrome: upload, transcript display, click-to-play, and error
   messages.
+- Recording in Chrome, both with a real microphone and with the spoken sample
+  fed in instead: the WebM recording was transcribed correctly and
+  click-to-play worked on it.
 
-Not tested: real human recordings, noisy audio, M4A/FLAC/OGG files, Windows,
-GPUs.
+Not tested: real human recordings, noisy audio, M4A/FLAC/OGG files, recording
+in Safari or Firefox, Windows, GPUs.
 
 ## Project files
 

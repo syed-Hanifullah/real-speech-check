@@ -38,6 +38,7 @@
   }
   button.secondary { background: var(--card); color: var(--accent); }
   button:disabled { opacity: .5; cursor: not-allowed; }
+  #record[aria-pressed="true"] { background: var(--err-text); border-color: var(--err-text); color: #fff; }
   button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   .status { color: var(--muted); }
   .spinner {
@@ -73,14 +74,18 @@
 <body>
 <main>
   <h1>Transcription demo</h1>
-  <p class="sub">Upload an audio file to get a timestamped transcript.</p>
+  <p class="sub">Upload or record audio to get a timestamped transcript.</p>
 
   <section class="card">
     <form id="form">
       <label class="drop" id="drop">
         <span id="drop-text">Drop an audio file here, or choose one</span>
-        <input type="file" id="file" name="file" accept=".wav,.mp3,.m4a,.flac,.ogg">
+        <input type="file" id="file" name="file" accept=".wav,.mp3,.m4a,.flac,.ogg,.webm">
       </label>
+      <div class="row">
+        <button type="button" class="secondary" id="record" aria-pressed="false">Record audio</button>
+        <span class="status" id="rec-status" aria-live="polite"></span>
+      </div>
       <div class="row">
         <label class="lang">Language
           <input type="text" id="language" name="language" placeholder="auto" maxlength="10">
@@ -117,11 +122,32 @@
   const statusEl = $("status"), errorEl = $("error"), result = $("result");
   const player = $("player"), list = $("segments");
 
+  const recordBtn = $("record"), recStatus = $("rec-status");
+  const DEFAULT_DROP_TEXT = "Drop an audio file here, or choose one";
+  // Browsers record in different formats: Chrome/Firefox WebM, Safari MP4.
+  const RECORD_FORMATS = [
+    ["audio/webm;codecs=opus", ".webm"],
+    ["audio/webm", ".webm"],
+    ["audio/ogg;codecs=opus", ".ogg"],
+    ["audio/mp4", ".m4a"],
+  ];
+
   let audioUrl = null, lastJson = null, rows = [], busy = false;
+  let chosenFile = null, recorder = null;
 
-  function selectedFile() { return fileInput.files[0] || null; }
+  function selectedFile() { return chosenFile; }
 
-  function updateButton() { submit.disabled = busy || !selectedFile(); }
+  function setFile(f) {
+    chosenFile = f;
+    $("drop-text").textContent = f ? f.name : DEFAULT_DROP_TEXT;
+    clearError();
+    updateButton();
+  }
+
+  function updateButton() {
+    submit.disabled = busy || recorder !== null || !selectedFile();
+    recordBtn.disabled = busy;
+  }
 
   function showError(message) { errorEl.textContent = message; errorEl.hidden = false; }
 
@@ -145,9 +171,52 @@
   }
 
   fileInput.addEventListener("change", () => {
-    const f = selectedFile();
-    $("drop-text").textContent = f ? f.name : "Drop an audio file here, or choose one";
+    recStatus.textContent = "";
+    setFile(fileInput.files[0] || null);
+  });
+
+  recordBtn.addEventListener("click", async () => {
+    if (recorder) { recorder.stop(); return; }
     clearError();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+      showError("This browser can't record audio here. Recording needs a recent browser and a page opened via localhost or HTTPS. Upload a file instead.");
+      return;
+    }
+    const format = RECORD_FORMATS.find(([type]) => MediaRecorder.isTypeSupported(type));
+    if (!format) { showError("This browser can't record in a supported format. Upload a file instead."); return; }
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      showError(err.name === "NotAllowedError"
+        ? "Microphone access was blocked. Allow it in your browser's site settings and try again."
+        : "Could not start the microphone: " + err.message);
+      return;
+    }
+
+    const chunks = [];
+    const started = Date.now();
+    const timer = setInterval(() => { recStatus.textContent = "Recording… " + fmt((Date.now() - started) / 1000); }, 250);
+    recorder = new MediaRecorder(stream, { mimeType: format[0] });
+    recorder.addEventListener("dataavailable", (e) => { if (e.data.size) chunks.push(e.data); });
+    recorder.addEventListener("stop", () => {
+      clearInterval(timer);
+      stream.getTracks().forEach((t) => t.stop());  // turn the microphone off
+      recorder = null;
+      recordBtn.textContent = "Record audio";
+      recordBtn.setAttribute("aria-pressed", "false");
+      const seconds = (Date.now() - started) / 1000;
+      const blob = new Blob(chunks, { type: format[0].split(";")[0] });
+      if (!blob.size) { recStatus.textContent = ""; showError("Nothing was recorded. Check your microphone and try again."); updateButton(); return; }
+      fileInput.value = "";
+      recStatus.textContent = "Recorded " + fmt(seconds) + ". Press Transcribe, or record again.";
+      setFile(new File([blob], "recording" + format[1], { type: blob.type }));
+    });
+    recorder.start();
+    recordBtn.textContent = "Stop recording";
+    recordBtn.setAttribute("aria-pressed", "true");
+    recStatus.textContent = "Recording… 00:00";
     updateButton();
   });
 

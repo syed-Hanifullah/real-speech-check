@@ -40,6 +40,13 @@ def test_upload_wav(client):
     assert data["backend"] == "mock"
 
 
+def test_upload_browser_recording_accepted(client):
+    # Chrome and Firefox record as WebM; the page uploads it as recording.webm.
+    res = client.post("/api/transcribe", files={"file": ("recording.webm", b"\x1aE\xdf\xa3", "audio/webm")})
+    assert res.status_code == 200
+    assert res.json()["source_file"] == "recording.webm"
+
+
 def test_upload_txt_rejected(client):
     res = client.post("/api/transcribe", files={"file": ("notes.txt", b"hello", "text/plain")})
     assert res.status_code == 400

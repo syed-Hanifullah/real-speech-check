@@ -22,7 +22,7 @@ from typing import Protocol
 
 log = logging.getLogger("transcribe")
 
-SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg"}
+SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}
 MAX_FILE_BYTES = 200 * 1024 * 1024  # whole file is decoded into memory
 
 EXIT_OK = 0
@@ -215,7 +215,7 @@ def transcribe_file(path: Path | str, backend: Backend, language: str | None = N
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Transcribe an audio file to timestamped JSON.")
-    parser.add_argument("audio", type=Path, help="audio file (.wav .mp3 .m4a .flac .ogg)")
+    parser.add_argument("audio", type=Path, help="audio file (.wav .mp3 .m4a .flac .ogg .webm)")
     parser.add_argument("-o", "--output", type=Path, help="write JSON here instead of stdout")
     parser.add_argument("--backend", choices=["whisper", "mock"], default="whisper")
     parser.add_argument("--model", default="base", help="Whisper model size (tiny, base, small, ...)")

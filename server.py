@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from transcribe import (
     MAX_FILE_BYTES,
+    MAX_FILE_LABEL,
     Backend,
     InvalidInputError,
     TranscriptionError,
@@ -63,7 +64,7 @@ def api_transcribe(file: UploadFile = File(...), language: str | None = Form(Non
     # Plain `def`: FastAPI runs it in a thread pool, so the blocking model
     # call doesn't stall the event loop.
     if file.size is not None and file.size > MAX_FILE_BYTES:
-        return error(413, f"file is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB")
+        return error(413, f"file is larger than {MAX_FILE_LABEL}")
 
     suffix = Path(file.filename or "").suffix.lower()
     fd, tmp_name = tempfile.mkstemp(suffix=suffix)
@@ -72,7 +73,7 @@ def api_transcribe(file: UploadFile = File(...), language: str | None = Form(Non
         with os.fdopen(fd, "wb") as out:
             shutil.copyfileobj(file.file, out)
         if tmp_path.stat().st_size > MAX_FILE_BYTES:
-            return error(413, f"file is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB")
+            return error(413, f"file is larger than {MAX_FILE_LABEL}")
 
         transcript = transcribe_file(tmp_path, get_backend(), language or None)
         result = transcript.to_dict()

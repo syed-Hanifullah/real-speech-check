@@ -1,8 +1,10 @@
 import json
+import math
 import struct
 import sys
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,11 +12,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import transcribe  # noqa: E402
 from transcribe import (  # noqa: E402
+    SAMPLE_RATE,
+    FasterWhisperBackend,
     InvalidInputError,
     MockBackend,
     TranscriptionError,
+    iter_audio_chunks,
     transcribe_file,
 )
+
+
+def write_wav(path: Path, samples: list[int], rate: int = SAMPLE_RATE) -> Path:
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    return path
 
 
 @pytest.fixture
@@ -79,3 +93,53 @@ def test_cli(wav_file, tmp_path):
     assert transcribe.main([str(wav_file), "--backend", "mock", "-o", str(out)]) == 0
     assert json.loads(out.read_text())["segments"]
     assert transcribe.main([str(tmp_path / "missing.wav"), "--backend", "mock"]) == 2
+
+
+def test_file_over_limit(wav_file, monkeypatch):
+    monkeypatch.setattr(transcribe, "MAX_FILE_BYTES", 100)
+    with pytest.raises(InvalidInputError, match="limit"):
+        transcribe_file(wav_file, MockBackend())
+
+
+def test_chunks_are_cut_at_a_pause_and_lose_no_audio(tmp_path):
+    # 5 s of tone with a silent gap from 1.8 to 2.7 s.
+    rate = SAMPLE_RATE
+    samples = [int(8000 * math.sin(2 * math.pi * 440 * i / rate)) for i in range(5 * rate)]
+    samples[int(1.8 * rate): int(2.7 * rate)] = [0] * int(0.9 * rate)
+    path = write_wav(tmp_path / "gap.wav", samples)
+
+    chunks = list(iter_audio_chunks(path, chunk_s=3))
+
+    assert len(chunks) == 2
+    assert 1.8 * rate <= chunks[1][0] <= 2.7 * rate  # second chunk starts in the gap
+    assert chunks[1][0] == len(chunks[0][1])  # chunks are back to back
+    assert sum(len(audio) for _, audio in chunks) == 5 * rate
+
+
+class FakeWhisperModel:
+    """Returns one segment at 0.5-1.0 s of every chunk it is given."""
+
+    def __init__(self):
+        self.languages = []
+
+    def transcribe(self, audio, language=None, **kwargs):
+        self.languages.append(language)
+        segment = SimpleNamespace(start=0.5, end=1.0, text=" hello ", avg_logprob=-0.1)
+        info = SimpleNamespace(language="en", language_probability=0.9)
+        return iter([segment]), info
+
+
+def test_chunk_timestamps_are_shifted_to_the_whole_file(tmp_path):
+    path = write_wav(tmp_path / "long.wav", [0] * (7 * SAMPLE_RATE))
+    model = FakeWhisperModel()
+    backend = FasterWhisperBackend("fake", chunk_minutes=3 / 60, model=model)
+
+    t = transcribe_file(path, backend)
+
+    chunk_starts = [start / SAMPLE_RATE for start, _ in iter_audio_chunks(path, 3)]
+    assert len(chunk_starts) > 1
+    assert [s.start for s in t.segments] == [round(c + 0.5, 2) for c in chunk_starts]
+    assert [s.id for s in t.segments] == list(range(len(chunk_starts)))
+    assert t.duration_s == 7.0
+    # Language is detected on the first chunk, then reused.
+    assert model.languages == [None] + ["en"] * (len(chunk_starts) - 1)

@@ -23,7 +23,15 @@ from typing import Protocol
 log = logging.getLogger("transcribe")
 
 SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}
-MAX_FILE_BYTES = 200 * 1024 * 1024  # whole file is decoded into memory
+# Audio is decoded in chunks, so memory doesn't grow with file size. The cap
+# only keeps a single job's disk use and run time bounded.
+MAX_FILE_BYTES = 2 * 1024**3
+MAX_FILE_LABEL = "2 GB"
+
+SAMPLE_RATE = 16000  # what Whisper expects
+DEFAULT_CHUNK_MINUTES = 10.0
+CUT_SEARCH_S = 30  # look for a quiet spot in the last 30 s of each chunk
+CUT_WINDOW = SAMPLE_RATE // 2  # 0.5 s: long enough to skip short pauses mid-sentence
 
 EXIT_OK = 0
 EXIT_INVALID_INPUT = 2
@@ -74,13 +82,76 @@ class Backend(Protocol):
         ...
 
 
+def _quiet_cut(chunk, search: int) -> int:
+    """Index of the middle of the quietest half second near the end of `chunk`."""
+    import numpy as np
+
+    tail = chunk[len(chunk) - search:].astype(np.float32)
+    windows = len(tail) // CUT_WINDOW
+    if windows == 0:
+        return len(chunk)
+    energy = (tail[: windows * CUT_WINDOW].reshape(windows, CUT_WINDOW) ** 2).mean(axis=1)
+    return len(chunk) - search + int(energy.argmin()) * CUT_WINDOW + CUT_WINDOW // 2
+
+
+def iter_audio_chunks(path: Path, chunk_s: float):
+    """Decode any supported file to 16 kHz mono and yield (start_sample, audio)
+    pieces of about `chunk_s` seconds, as float32 arrays.
+
+    Only one chunk is held in memory at a time. Each cut is placed at the
+    quietest moment near the end of the chunk, so words are rarely split.
+    """
+    import av
+    import numpy as np
+
+    chunk_len = max(int(chunk_s * SAMPLE_RATE), CUT_WINDOW * 2)
+    search = min(CUT_SEARCH_S * SAMPLE_RATE, chunk_len // 2)
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+    pending: list = []
+    buffered = 0
+    start = 0
+
+    def frames(container):
+        decoded = container.decode(audio=0)
+        while True:
+            try:
+                frame = next(decoded)
+            except StopIteration:
+                break
+            except av.error.InvalidDataError:
+                continue  # skip a damaged frame rather than fail the whole file
+            frame.pts = None
+            yield frame
+        yield None  # flushes the resampler
+
+    with av.open(str(path)) as container:
+        for frame in frames(container):
+            for out in resampler.resample(frame):
+                samples = out.to_ndarray().reshape(-1)
+                pending.append(samples)
+                buffered += len(samples)
+            while buffered >= chunk_len:
+                audio = np.concatenate(pending)
+                cut = _quiet_cut(audio[:chunk_len], search)
+                yield start, audio[:cut].astype(np.float32) / 32768.0
+                start += cut
+                pending, buffered = [audio[cut:]], len(audio) - cut
+    if buffered:
+        yield start, np.concatenate(pending).astype(np.float32) / 32768.0
+
+
 class FasterWhisperBackend:
-    """Local Whisper via faster-whisper. Decoding is done by its bundled PyAV."""
+    """Local Whisper via faster-whisper, fed one chunk of audio at a time."""
 
     name = "faster-whisper"
 
-    def __init__(self, model_name: str = "base"):
+    def __init__(self, model_name: str = "base",
+                 chunk_minutes: float = DEFAULT_CHUNK_MINUTES, model=None):
         self.model_name = model_name
+        self.chunk_s = chunk_minutes * 60
+        if model is not None:  # tests pass a stand-in model
+            self._model = model
+            return
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
@@ -95,25 +166,48 @@ class FasterWhisperBackend:
             raise TranscriptionError(f"could not load model {model_name!r}: {exc}") from exc
 
     def transcribe(self, path: Path, language: str | None) -> tuple[list[Segment], dict]:
-        raw_segments, info = self._model.transcribe(
-            str(path), language=language, beam_size=5, vad_filter=True
-        )
-        # raw_segments is a lazy generator: decoding happens while iterating.
-        segments = [
-            Segment(
-                id=i,
-                start=round(s.start, 2),
-                end=round(s.end, 2),
-                text=s.text.strip(),
-                confidence=round(math.exp(s.avg_logprob), 3),
+        segments: list[Segment] = []
+        first_info = None
+        total_samples = 0
+        for n, (start, audio) in enumerate(iter_audio_chunks(path, self.chunk_s), 1):
+            offset = start / SAMPLE_RATE
+            log.info("chunk %d: %s - %s", n, _clock(offset), _clock(offset + len(audio) / SAMPLE_RATE))
+            raw_segments, info = self._model.transcribe(
+                audio, language=language, beam_size=5, vad_filter=True,
+                # Word timings make segment times exact when silence is skipped;
+                # without them a segment can "end" after a long pause.
+                word_timestamps=True,
             )
-            for i, s in enumerate(raw_segments)
-        ]
+            if first_info is None:
+                first_info = info
+                # Detect the language once, then keep it for every later chunk.
+                language = language or info.language
+            # Whisper can report an end slightly past the audio it was given;
+            # clamp so segments never run past their chunk (or the file).
+            chunk_end = offset + len(audio) / SAMPLE_RATE
+            # raw_segments is lazy: the model runs while we iterate.
+            for s in raw_segments:
+                segments.append(Segment(
+                    id=len(segments),
+                    start=round(min(offset + s.start, chunk_end), 2),
+                    end=round(min(offset + s.end, chunk_end), 2),
+                    text=s.text.strip(),
+                    confidence=round(math.exp(s.avg_logprob), 3),
+                ))
+            total_samples = start + len(audio)
+        if first_info is None:
+            raise TranscriptionError(f"no audio could be decoded from {path.name}")
         return segments, {
-            "language": info.language,
-            "language_probability": round(info.language_probability, 3),
-            "duration_s": round(info.duration, 2),
+            "language": first_info.language,
+            "language_probability": round(first_info.language_probability, 3),
+            "duration_s": round(total_samples / SAMPLE_RATE, 2),
         }
+
+
+def _clock(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}"
 
 
 class MockBackend:
@@ -144,11 +238,12 @@ class MockBackend:
         }
 
 
-def make_backend(name: str, model: str = "base") -> Backend:
+def make_backend(name: str, model: str = "base",
+                 chunk_minutes: float = DEFAULT_CHUNK_MINUTES) -> Backend:
     if name == "mock":
         return MockBackend()
     if name == "whisper":
-        return FasterWhisperBackend(model)
+        return FasterWhisperBackend(model, chunk_minutes)
     raise InvalidInputError(f"unknown backend {name!r}")
 
 
@@ -166,7 +261,7 @@ def validate_input(path: Path) -> None:
         raise InvalidInputError(f"file is empty: {path}")
     if size > MAX_FILE_BYTES:
         raise InvalidInputError(
-            f"file is {size / 1e6:.0f} MB, limit is {MAX_FILE_BYTES // (1024 * 1024)} MB"
+            f"file is {size / 1e6:.0f} MB, limit is {MAX_FILE_LABEL}"
         )
 
 
@@ -220,8 +315,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backend", choices=["whisper", "mock"], default="whisper")
     parser.add_argument("--model", default="base", help="Whisper model size (tiny, base, small, ...)")
     parser.add_argument("--language", default=None, help="language code, e.g. en; default: auto-detect")
+    parser.add_argument(
+        "--chunk-minutes", type=float, default=DEFAULT_CHUNK_MINUTES,
+        help=f"transcribe long audio in pieces of this many minutes (default {DEFAULT_CHUNK_MINUTES:g})",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     args = parser.parse_args(argv)
+    if args.chunk_minutes <= 0:
+        parser.error("--chunk-minutes must be greater than 0")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -231,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         validate_input(args.audio)  # fail fast, before loading a model
-        backend = make_backend(args.backend, args.model)
+        backend = make_backend(args.backend, args.model, args.chunk_minutes)
         transcript = transcribe_file(args.audio, backend, args.language)
     except InvalidInputError as exc:
         log.error("invalid input: %s", exc)

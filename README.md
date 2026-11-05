@@ -28,7 +28,8 @@ pip install -r requirements.txt
 
 ## 2. Get an audio file
 
-Use any `.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg` or `.webm` file (up to 200 MB).
+Use any `.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg` or `.webm` file (up to 2 GB).
+Long files are handled automatically: see [Long recordings](#long-recordings).
 On the web page you can also skip this and record from your microphone.
 
 No recording handy? On macOS, make one:
@@ -79,11 +80,11 @@ example transcript, which is useful for checking the setup.
   "duration_s": 10.03,
   "text": "Hello, my name is Sarah, I am calling about my internet connection. ...",
   "segments": [
-    { "id": 0, "start": 0.0, "end": 4.64, "text": "Hello, my name is Sarah, I am calling about my internet connection.", "confidence": 0.782 },
-    { "id": 1, "start": 4.64, "end": 7.68, "text": "It has been dropping every evening for the past week.", "confidence": 0.782 }
+    { "id": 0, "start": 0.0, "end": 4.18, "text": "Hello, my name is Sarah, I am calling about my internet connection.", "confidence": 0.782 },
+    { "id": 1, "start": 4.56, "end": 7.34, "text": "It has been dropping every evening for the past week.", "confidence": 0.782 }
   ],
-  "processing_s": 1.49,
-  "created_at": "2026-11-05T05:06:51+00:00"
+  "processing_s": 0.54,
+  "created_at": "2026-11-05T05:55:57+00:00"
 }
 ```
 
@@ -96,7 +97,7 @@ example transcript, which is useful for checking the setup.
 
 ```
 python transcribe.py <audio> [-o out.json] [--model base] [--language en]
-                             [--backend whisper|mock] [-v]
+                             [--chunk-minutes 10] [--backend whisper|mock] [-v]
 ```
 
 | Option | What it does |
@@ -104,6 +105,7 @@ python transcribe.py <audio> [-o out.json] [--model base] [--language en]
 | `-o out.json` | Save to a file instead of printing |
 | `--model` | `tiny` (fastest), `base` (default), `small`, `medium`, `large-v3` (most accurate) |
 | `--language` | Language code like `en`; detected automatically if left out |
+| `--chunk-minutes` | Length of each piece long audio is split into (default `10`) |
 | `--backend mock` | Fixed example output, no model needed |
 | `-v` | Show more detail in the logs |
 
@@ -118,7 +120,23 @@ other tools.
 
 The web page's endpoint, `POST /api/transcribe`, returns the same JSON. Errors
 come back as `{"error": "..."}` with status `400` (bad input), `413` (over
-200 MB) or `500` (transcription failed).
+2 GB) or `500` (transcription failed).
+
+## Long recordings
+
+Long files are split into pieces of about 10 minutes and transcribed one piece
+at a time, so memory use stays about the same however long the recording is.
+You don't need to do anything: it happens automatically, and the output is one
+continuous transcript with timestamps for the whole file.
+
+- Each cut is placed in the quietest half second near the 10-minute mark, so
+  sentences are rarely split.
+- The language is detected from the first piece and used for the rest.
+- `--chunk-minutes` changes the piece length. Try `--chunk-minutes 0.1` on a
+  short file to see it split (the log shows each piece).
+
+Tested on a 22-minute, 233 MB WAV: 3 pieces, about 7 seconds with the `tiny`
+model, and around 700 MB of memory including the model.
 
 ## Part 1: Implementation notes
 
@@ -132,11 +150,14 @@ checked before the model loads, and broken files are caught and reported.
 Limit: the check trusts the file name. In production I'd inspect the file with
 `ffprobe` and convert it with `ffmpeg` first.
 
-**Long audio.** Whisper reads audio 30 seconds at a time, so memory use stays
-flat, and silence is skipped. But the whole file is loaded into memory first,
-hence the 200 MB limit. For multi-hour files: split at pauses into ~10-minute
-chunks, transcribe them in parallel, shift each chunk's timestamps and join
-them, and save progress after each chunk.
+**Long audio.** faster-whisper normally loads the whole file into memory before
+transcribing, so a long recording needs a lot of memory. Instead, the file is
+decoded and transcribed in ~10-minute pieces, cut at a quiet moment. Each
+piece's timestamps are shifted by where it starts, so the result is one
+transcript. Memory stays flat, which is why files up to 2 GB are accepted.
+Whisper itself works 30 seconds at a time and skips silence. Still to do for
+very long files: transcribe pieces in parallel on several machines, and save
+progress after each piece so a failure doesn't restart the whole file.
 
 ## Part 2: System design
 
@@ -170,12 +191,15 @@ request. The design above is what I'd build for real traffic.
 pytest
 ```
 
-Runs 10 tests using the mock backend, so no model download is needed.
+Runs 13 tests using the mock backend, so no model download is needed.
 
 Also checked by hand on macOS:
 
 - Speech made with macOS `say`, as WAV and MP3: the transcripts matched the
   spoken text word for word, with sensible timestamps.
+- A 22-minute, 233 MB WAV with speech spread through it: split into 3 pieces,
+  every sentence transcribed in full with the right timestamps, through both
+  the command line and the web endpoint.
 - Missing, empty, wrong-type and corrupt files give the right exit codes and a
   one-line error.
 - The web page in Chrome: upload, transcript display, click-to-play, and error

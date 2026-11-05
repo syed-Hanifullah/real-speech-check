@@ -53,6 +53,11 @@
   dt { font-size: .8rem; color: var(--muted); }
   dd { margin: 0; font-weight: 600; }
   audio { width: 100%; }
+  pre.json {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px; margin: 12px 0 0; max-height: 400px; overflow: auto;
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
   ol.segments { list-style: none; margin: 0; padding: 0; }
   ol.segments li + li { margin-top: 4px; }
   .seg {
@@ -106,8 +111,10 @@
     </dl>
     <audio id="player" controls preload="metadata"></audio>
     <div class="row">
+      <button type="button" class="secondary" id="show-json" aria-expanded="false" aria-controls="json-view">Show JSON</button>
       <button type="button" class="secondary" id="download">Download JSON</button>
     </div>
+    <pre class="json" id="json-view" hidden></pre>
     <h2 style="font-size:1.1rem;margin:16px 0 8px">Segments</h2>
     <p class="status" id="no-speech" hidden>No speech was found in this file.</p>
     <ol class="segments" id="segments"></ol>
@@ -261,8 +268,17 @@
     }
   });
 
+  function setJsonVisible(on) {
+    const view = $("json-view");
+    view.hidden = !on;
+    view.textContent = on ? JSON.stringify(lastJson, null, 2) : "";
+    $("show-json").textContent = on ? "Hide JSON" : "Show JSON";
+    $("show-json").setAttribute("aria-expanded", String(on));
+  }
+
   function render(data, f) {
     lastJson = data;
+    setJsonVisible(false);
     $("m-lang").textContent = data.language
       ? data.language + (data.language_probability != null ? " (" + Math.round(data.language_probability * 100) + "%)" : "")
       : "unknown";
@@ -315,6 +331,10 @@
       btn.classList.toggle("current", on);
       if (on) btn.setAttribute("aria-current", "true"); else btn.removeAttribute("aria-current");
     });
+  });
+
+  $("show-json").addEventListener("click", () => {
+    if (lastJson) setJsonVisible($("json-view").hidden);
   });
 
   $("download").addEventListener("click", () => {
